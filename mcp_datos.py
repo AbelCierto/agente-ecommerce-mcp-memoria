@@ -15,7 +15,9 @@ Endpoint MCP:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
 from fastmcp import FastMCP
 
@@ -45,14 +47,57 @@ def as_json(rows: list[dict], empty_message: str = "No se encontraron resultados
     return json.dumps(rows or [{"message": empty_message}], ensure_ascii=False, default=str)
 
 
+def _normalizar_texto(texto: str, max_len: int = 120) -> str:
+    normalized = re.sub(r"\s+", " ", (texto or "").strip())
+    if not normalized:
+        raise ValueError("El texto de búsqueda no puede estar vacío.")
+    if len(normalized) > max_len:
+        raise ValueError(f"El texto supera el máximo permitido ({max_len} caracteres).")
+    return normalized
+
+
+def _validar_customer_id(customer_id: str) -> str:
+    cleaned = _normalizar_texto(customer_id, max_len=64)
+    if not re.fullmatch(r"[A-Za-z0-9_\-]+", cleaned):
+        raise ValueError("Customer_ID inválido. Usa solo letras, números, guion o guion bajo.")
+    return cleaned
+
+
+@lru_cache(maxsize=1)
+def _year_bounds() -> tuple[int, int]:
+    sql = "SELECT MIN(Year) AS min_year, MAX(Year) AS max_year FROM orders"
+    rows = ejecutar_sql(sql)
+    if not rows:
+        return (1900, 2100)
+    min_year = int(rows[0].get("min_year") or 1900)
+    max_year = int(rows[0].get("max_year") or 2100)
+    return (min_year, max_year)
+
+
+def _validar_year(year: int | None) -> int | None:
+    if year is None:
+        return None
+    min_year, max_year = _year_bounds()
+    if year < min_year or year > max_year:
+        raise ValueError(
+            f"Año fuera de rango para el dataset ({min_year}-{max_year})."
+        )
+    return year
+
+
 @mcp.tool()
 def buscar_clientes(texto: str, limite: int = 10) -> str:
     """Busca clientes por Customer_ID, país, ciudad, segmento o membresía.
 
     Úsala antes de consultar a un cliente cuando no se conoce un Customer_ID exacto.
     """
+    try:
+        normalized = _normalizar_texto(texto)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
     limite = max(1, min(limite, 25))
-    p = f"%{texto.strip()}%"
+    p = f"%{normalized}%"
     sql = """
     SELECT Customer_ID,
            MAX(Country) AS Country,
@@ -75,6 +120,11 @@ def buscar_clientes(texto: str, limite: int = 10) -> str:
 @mcp.tool()
 def resumen_cliente(customer_id: str) -> str:
     """Resume compras, gasto, utilidad, ticket promedio, unidades y período de actividad de un cliente exacto."""
+    try:
+        customer_id = _validar_customer_id(customer_id)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
     sql = """
     SELECT Customer_ID,
            MAX(Country) AS Country,
@@ -99,6 +149,11 @@ def resumen_cliente(customer_id: str) -> str:
 @mcp.tool()
 def perfil_compras_cliente(customer_id: str, limite: int = 8) -> str:
     """Muestra las categorías y subcategorías con mayor gasto de un cliente exacto."""
+    try:
+        customer_id = _validar_customer_id(customer_id)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
     limite = max(1, min(limite, 20))
     sql = """
     SELECT Product_Category,
@@ -119,6 +174,11 @@ def perfil_compras_cliente(customer_id: str, limite: int = 8) -> str:
 @mcp.tool()
 def experiencia_cliente(customer_id: str) -> str:
     """Evalúa experiencia de compra: devoluciones, rating, días de entrega, estados de orden y método de envío."""
+    try:
+        customer_id = _validar_customer_id(customer_id)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
     sql = """
     SELECT Customer_ID,
            COUNT(*) AS Total_Orders,
@@ -155,6 +215,11 @@ def ventas_por_dimension(dimension: str, year: int | None = None, limite: int = 
     key = dimension.strip().lower()
     if key not in columns:
         return as_json([], "Dimensión inválida. Usa: " + ", ".join(columns))
+    try:
+        year = _validar_year(year)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
     limite = max(1, min(limite, 25))
     column = columns[key]
     if year is None:
@@ -186,6 +251,13 @@ def ventas_por_dimension(dimension: str, year: int | None = None, limite: int = 
 @mcp.tool()
 def tendencia_ventas(year: int | None = None, country: str | None = None) -> str:
     """Resume ventas mensuales, utilidad, órdenes, ticket promedio y devoluciones. Puede filtrarse por año y país."""
+    try:
+        year = _validar_year(year)
+        if country is not None:
+            country = _normalizar_texto(country, max_len=80)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
     filters: list[str] = []
     params: list[object] = []
     if year is not None:
@@ -213,6 +285,9 @@ def tendencia_ventas(year: int | None = None, country: str | None = None) -> str
 @mcp.tool()
 def detalle_orden(order_id: int) -> str:
     """Recupera el detalle de una orden real por Order_ID. Úsala cuando el usuario entrega un identificador de orden."""
+    if order_id <= 0:
+        return as_json([], "Order_ID inválido. Debe ser un entero positivo.")
+
     sql = """
     SELECT Order_ID, Customer_ID, Order_Date, Country, City, Customer_Segment,
            Product_ID, Product_Category, Product_Subcategory, Brand,
@@ -225,6 +300,44 @@ def detalle_orden(order_id: int) -> str:
     WHERE Order_ID = ?
     """
     return as_json(ejecutar_sql(sql, (order_id,)), "Orden no encontrada")
+
+
+@mcp.tool()
+def ayuda_analitica(consulta: str = "") -> str:
+    """Guía de capacidades y límites del MCP para consultas ambiguas o fuera de alcance."""
+    try:
+        topic = _normalizar_texto(consulta, max_len=120) if consulta else "general"
+    except ValueError:
+        topic = "general"
+
+    capabilities = [
+        "Búsqueda y perfil de clientes por Customer_ID, país, ciudad, segmento y membresía.",
+        "Análisis de compras por categoría/subcategoría y experiencia (devoluciones, rating, entrega).",
+        "Rankings de ventas/utilidad por dimensión de negocio (país, segmento, canal, dispositivo, pago).",
+        "Tendencias mensuales por año y/o país, y detalle por Order_ID.",
+    ]
+    limits = [
+        "No ejecuta SQL libre ni operaciones de escritura (INSERT/UPDATE/DELETE).",
+        "Solo responde sobre datos existentes en el dataset cargado en SQLite.",
+        "No consulta fuentes externas, internet ni sistemas transaccionales en vivo.",
+    ]
+    examples = [
+        "Busca clientes Premium en Germany y resume al de mayor facturación.",
+        "Compara ventas por categoría en 2025.",
+        "Analiza la tendencia mensual de ventas de France en 2024.",
+        "Dame el detalle de la orden 615717.",
+    ]
+
+    return as_json(
+        [
+            {
+                "tema": topic,
+                "capacidades": capabilities,
+                "limites": limits,
+                "preguntas_sugeridas": examples,
+            }
+        ]
+    )
 
 
 if __name__ == "__main__":
