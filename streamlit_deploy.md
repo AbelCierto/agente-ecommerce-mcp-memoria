@@ -1,5 +1,9 @@
 # Despliegue en Streamlit Community Cloud
 
+> **⚠️ PRIMERO**: Completa el deployment en Railway de los servicios MCP.
+> 
+> Ver: [railway_deploy.md](railway_deploy.md)
+
 ## Arquitectura en la nube
 
 El proyecto tiene **3 procesos** que localmente corren en terminales separadas. En la nube hay que tomar una decisión arquitectónica:

@@ -301,6 +301,27 @@ Esta memoria no es conocimiento permanente. Se elimina al reiniciar el proceso d
 
 ---
 
+## Deployment en la nube
+
+Una vez que verificas que todo funciona localmente, puedes desplegar a:
+
+- **Backend MCPs** (datos + agente): Railway, Render, Fly.io, o tu propio VPS
+- **Frontend UI** (Streamlit): Streamlit Community Cloud (gratis)
+
+### Documentación de deployment
+
+1. **[railway_deploy.md](railway_deploy.md)** — Desplegar `mcp_datos.py` y `mcp_agente.py` en Railway
+2. **[streamlit_deploy.md](streamlit_deploy.md)** — Desplegar `app_streamlit.py` en Streamlit Community Cloud
+
+Sigue este orden:
+1. Prepara el repo (git push)
+2. Desplega los MCPs en Railway (railway_deploy.md)
+3. Desplega Streamlit en Streamlit Cloud (streamlit_deploy.md)
+4. Configura las URLs públicas como variables de entorno
+5. Prueba el sistema completo en la nube
+
+---
+
 ## Límites y extensiones
 
 Esta versión es adecuada para laboratorio local. Para un despliegue real convendría sustituir SQLite por una base administrada, `InMemorySaver` por persistencia compartida, las URLs locales por servicios desplegados y añadir autenticación, autorización, límites de tasa, logging centralizado, monitoreo y pruebas automatizadas.
