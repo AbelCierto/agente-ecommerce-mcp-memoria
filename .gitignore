@@ -5,3 +5,4 @@ __pycache__/
 data/ecommerce_orders.db
 .streamlit/secrets.toml
 .DS_Store
+.streamlit/secrets.tom

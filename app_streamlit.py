@@ -18,7 +18,13 @@ from dotenv import load_dotenv
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 load_dotenv()
-AGENT_MCP_URL = os.getenv("AGENT_MCP_URL", "http://127.0.0.1:8001/mcp")
+
+# Lee desde st.secrets (Streamlit Cloud) o desde .env (local)
+AGENT_MCP_URL = (
+    st.secrets.get("AGENT_MCP_URL")
+    if hasattr(st, "secrets") and "AGENT_MCP_URL" in st.secrets
+    else os.getenv("AGENT_MCP_URL", "http://127.0.0.1:8001/mcp")
+)
 
 st.set_page_config(page_title="E-commerce Agent MCP", page_icon="🛒", layout="wide")
 st.title("🛒 Agente e-commerce: Streamlit como cliente MCP")
