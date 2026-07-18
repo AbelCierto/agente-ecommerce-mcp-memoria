@@ -6,7 +6,7 @@
         "C:/python-dev/agent_mpc_memory/clase3_agente_mcp_memoria/mcp_agente.py"
       ],
       "env": {
-        "OPENAI_API_KEY": "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",
+        "OPENAI_API_KEY": "sk-proj-PEGA_TU_CLAVE_AQUI",
         "OPENAI_MODEL": "gpt-5.4-nano",
         "DATA_MCP_URL": "http://127.0.0.1:8000/mcp",
         "MEMORY_WINDOW_MESSAGES": "8"
