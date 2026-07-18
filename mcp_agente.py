@@ -48,6 +48,7 @@ async def resolver_consulta_ecommerce(
 if __name__ == "__main__":
     transport = os.getenv("MCP_AGENT_TRANSPORT", "stdio").lower()
     if transport == "http":
-        mcp.run(transport="http", host="127.0.0.1", port=8001)
+        port = int(os.getenv("PORT", 8001))
+        mcp.run(transport="http", host="0.0.0.0", port=port)
     else:
         mcp.run()
