@@ -10,7 +10,9 @@ Es un cliente que consume mcp_agente.py por HTTP y hace visible:
 """
 from __future__ import annotations
 import asyncio
+import csv
 import hmac
+import io
 import json
 import os
 import uuid
@@ -36,12 +38,96 @@ APP_LOGIN_ENABLED = str(
         "true" if APP_LOGIN_USERNAME and APP_LOGIN_PASSWORD else "false",
     )
 ).lower() in {"1", "true", "yes", "on"}
+DEFAULT_ANALYSIS_MODE = str(get_config_value("DEFAULT_ANALYSIS_MODE", "operativo")).lower()
+PDF_EXPORT_ENABLED = str(get_config_value("PDF_EXPORT_ENABLED", "true")).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+}
 
 st.set_page_config(page_title="E-commerce Agent MCP", page_icon="🛒", layout="wide")
 
 
+st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=Manrope:wght@400;600;700&display=swap');
+
+:root {
+    --bg-1: #f8fbff;
+    --bg-2: #eef6ff;
+    --ink: #1e293b;
+    --ink-soft: #475569;
+    --brand: #0f766e;
+    --brand-2: #0ea5a4;
+    --card: rgba(255, 255, 255, 0.92);
+    --line: rgba(14, 116, 110, 0.18);
+}
+
+.stApp {
+    background: radial-gradient(circle at 15% 10%, var(--bg-2) 0%, var(--bg-1) 45%, #ffffff 100%);
+}
+
+h1, h2, h3, h4 {
+    font-family: 'Outfit', sans-serif !important;
+    color: var(--ink);
+}
+
+p, label, .stMarkdown, .stCaption, .stText {
+    font-family: 'Manrope', sans-serif !important;
+    color: var(--ink-soft);
+}
+
+.hero-box {
+    background: linear-gradient(120deg, rgba(15, 118, 110, 0.12), rgba(14, 165, 164, 0.12));
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px 18px;
+    margin: 6px 0 16px 0;
+}
+
+.kpi-card {
+    background: var(--card);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 14px;
+    padding: 14px 16px;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+}
+
+.kpi-title {
+    font-size: 0.85rem;
+    color: #64748b;
+    margin-bottom: 4px;
+}
+
+.kpi-value {
+    font-size: 1.35rem;
+    font-weight: 800;
+    color: #0f172a;
+}
+
+.stChatInput {
+    border-top: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+@media (max-width: 900px) {
+    .hero-box {
+        padding: 12px 14px;
+    }
+    .kpi-value {
+        font-size: 1.15rem;
+    }
+}
+</style>
+""",
+        unsafe_allow_html=True,
+)
+
+
 def render_login_form() -> None:
     st.title("🔐 Iniciar sesión")
+    st.markdown("### Bienvenido al trabajo final de Abel Cierto del curso: Estrategias de Integración")
     st.caption("Acceso privado al panel del agente e-commerce.")
     with st.form("login_form"):
         username = st.text_input("Usuario")
@@ -74,8 +160,15 @@ if APP_LOGIN_ENABLED:
         render_login_form()
         st.stop()
 
-st.title("🛒 Agente e-commerce: Streamlit como cliente MCP")
-st.caption("La UI consume el MCP del agente; el agente consume el MCP de datos.")
+st.markdown(
+    """
+<div class="hero-box">
+  <h1 style="margin:0;">🛒 Agente e-commerce: Centro de análisis MCP</h1>
+  <p style="margin:6px 0 0 0;">Explora hallazgos, conversa con el agente y exporta análisis ejecutivos en un solo panel.</p>
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
 if "session_id" not in st.session_state:
     st.session_state.session_id = f"streamlit-{uuid.uuid4().hex[:10]}"
@@ -83,6 +176,75 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
+if "analysis_mode" not in st.session_state:
+    st.session_state.analysis_mode = "ejecutivo" if DEFAULT_ANALYSIS_MODE == "ejecutivo" else "operativo"
+
+
+def preparar_mensaje_usuario(mensaje: str) -> str:
+    if st.session_state.analysis_mode == "ejecutivo":
+        return (
+            "Responde en modo ejecutivo: máximo 5 bullets, enfoque en impacto de negocio, "
+            "cifras clave y recomendación accionable.\n\n"
+            f"Consulta original: {mensaje}"
+        )
+    return mensaje
+
+
+def contar_tool_calls(result: dict | None) -> int:
+    if not result:
+        return 0
+    trace = result.get("traza", [])
+    if not isinstance(trace, list):
+        return 0
+    return sum(1 for item in trace if isinstance(item, dict) and item.get("tipo") == "tool_call")
+
+
+def export_csv_bytes(result: dict) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["campo", "valor"])
+    writer.writerow(["session_id", result.get("session_id", "")])
+    writer.writerow(["canal", result.get("canal", "")])
+    writer.writerow(["modelo", result.get("modelo", "")])
+    writer.writerow(["respuesta", result.get("respuesta", "")])
+    writer.writerow(["memoria", json.dumps(result.get("memoria", {}), ensure_ascii=False)])
+    writer.writerow(["traza", json.dumps(result.get("traza", []), ensure_ascii=False)])
+    writer.writerow(["historial_visible", json.dumps(result.get("historial_visible", []), ensure_ascii=False)])
+    return output.getvalue().encode("utf-8")
+
+
+def export_pdf_bytes(result: dict) -> bytes | None:
+    try:
+        from fpdf import FPDF
+    except Exception:
+        return None
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.multi_cell(0, 8, "Reporte de analisis e-commerce")
+    pdf.ln(1)
+    pdf.set_font("Helvetica", size=11)
+    pdf.multi_cell(0, 6, f"Session ID: {result.get('session_id', '')}")
+    pdf.multi_cell(0, 6, f"Canal: {result.get('canal', '')}")
+    pdf.multi_cell(0, 6, f"Modelo: {result.get('modelo', '')}")
+    pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.multi_cell(0, 7, "Respuesta")
+    pdf.set_font("Helvetica", size=11)
+    pdf.multi_cell(0, 6, str(result.get("respuesta", "")))
+    pdf.ln(2)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.multi_cell(0, 7, "Memoria")
+    pdf.set_font("Helvetica", size=10)
+    pdf.multi_cell(0, 5, json.dumps(result.get("memoria", {}), ensure_ascii=False, indent=2))
+
+    # output(dest='S') devuelve str en algunas versiones y bytes en otras.
+    raw = pdf.output(dest="S")
+    if isinstance(raw, bytes):
+        return raw
+    return raw.encode("latin-1", errors="ignore")
 
 async def llamar_agente(mensaje: str) -> dict:
     client = MultiServerMCPClient(
@@ -94,7 +256,7 @@ async def llamar_agente(mensaje: str) -> dict:
     result = await tool.ainvoke({
         "mensaje": mensaje,
         "session_id": st.session_state.session_id,
-        "canal": "streamlit",
+        "canal": f"streamlit-{st.session_state.analysis_mode}",
     })
     # langchain_mcp_adapters puede devolver una lista de objetos de contenido MCP
     # en lugar del dict directamente. Normalizamos aquí.
@@ -126,8 +288,47 @@ with st.sidebar:
         st.session_state.last_result = None
         st.rerun()
     st.divider()
+    st.subheader("Modo de análisis")
+    st.session_state.analysis_mode = st.radio(
+        "Estilo de respuesta",
+        options=["operativo", "ejecutivo"],
+        index=1 if st.session_state.analysis_mode == "ejecutivo" else 0,
+        horizontal=True,
+    )
+    st.caption("Ejecutivo resume hallazgos en formato corto y accionable.")
+    st.divider()
     st.write("Servidor esperado:")
     st.code(AGENT_MCP_URL)
+
+
+total_msgs = len(st.session_state.messages)
+total_user_msgs = sum(1 for m in st.session_state.messages if m.get("role") == "user")
+tool_calls = contar_tool_calls(st.session_state.last_result)
+memory_type = "sin datos"
+if st.session_state.last_result and isinstance(st.session_state.last_result.get("memoria"), dict):
+    memory_type = st.session_state.last_result["memoria"].get("tipo", "sin datos")
+
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.markdown(
+        f"<div class='kpi-card'><div class='kpi-title'>Mensajes en sesión</div><div class='kpi-value'>{total_msgs}</div></div>",
+        unsafe_allow_html=True,
+    )
+with k2:
+    st.markdown(
+        f"<div class='kpi-card'><div class='kpi-title'>Consultas de usuario</div><div class='kpi-value'>{total_user_msgs}</div></div>",
+        unsafe_allow_html=True,
+    )
+with k3:
+    st.markdown(
+        f"<div class='kpi-card'><div class='kpi-title'>Tools usadas (última)</div><div class='kpi-value'>{tool_calls}</div></div>",
+        unsafe_allow_html=True,
+    )
+with k4:
+    st.markdown(
+        f"<div class='kpi-card'><div class='kpi-title'>Tipo de memoria</div><div class='kpi-value'>{memory_type}</div></div>",
+        unsafe_allow_html=True,
+    )
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -135,6 +336,7 @@ for message in st.session_state.messages:
 
 prompt = st.chat_input("Ej.: Busca clientes Premium y analiza al de mayor gasto.")
 if prompt:
+    prompt_to_agent = preparar_mensaje_usuario(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -142,7 +344,7 @@ if prompt:
     with st.chat_message("assistant"):
         with st.spinner("El cliente MCP consulta al agente..."):
             try:
-                result = asyncio.run(llamar_agente(prompt))
+                result = asyncio.run(llamar_agente(prompt_to_agent))
                 answer = result["respuesta"]
                 st.markdown(answer)
                 st.session_state.last_result = result
@@ -156,6 +358,30 @@ if prompt:
 
 if st.session_state.last_result:
     result = st.session_state.last_result
+    st.divider()
+    st.subheader("Exportar análisis")
+    csv_bytes = export_csv_bytes(result)
+    export_col1, export_col2 = st.columns(2)
+    with export_col1:
+        st.download_button(
+            label="Descargar CSV",
+            data=csv_bytes,
+            file_name=f"analisis_{st.session_state.session_id}.csv",
+            mime="text/csv",
+        )
+    with export_col2:
+        if PDF_EXPORT_ENABLED:
+            pdf_bytes = export_pdf_bytes(result)
+            if pdf_bytes is not None:
+                st.download_button(
+                    label="Descargar PDF",
+                    data=pdf_bytes,
+                    file_name=f"analisis_{st.session_state.session_id}.pdf",
+                    mime="application/pdf",
+                )
+            else:
+                st.info("Instala fpdf2 para habilitar exportación PDF.")
+
     left, right = st.columns(2)
     with left:
         st.subheader("Memoria de corto plazo")

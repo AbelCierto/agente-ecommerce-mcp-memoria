@@ -7,3 +7,4 @@ streamlit>=1.40.0
 python-dotenv>=1.0.1
 pandas>=2.0.0
 redis>=5.0.0
+fpdf2>=2.7.9
