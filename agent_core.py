@@ -12,6 +12,7 @@ No contiene Streamlit ni configuración de Claude Desktop. Eso permite reutiliza
 la misma lógica desde diferentes clientes.
 """
 from __future__ import annotations
+import json
 import os
 from collections.abc import Iterable
 from dotenv import load_dotenv
@@ -29,6 +30,10 @@ load_dotenv()
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
 DATA_MCP_URL = os.getenv("DATA_MCP_URL", "http://127.0.0.1:8000/mcp")
 WINDOW_MESSAGES = int(os.getenv("MEMORY_WINDOW_MESSAGES", "8"))
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+REDIS_TTL_SECONDS = int(os.getenv("REDIS_TTL_SECONDS", "86400"))
+REDIS_KEY_PREFIX = os.getenv("REDIS_MEMORY_KEY_PREFIX", "mcp:memoria:")
+USE_REDIS_MEMORY = bool(REDIS_URL)
 
 SYSTEM_PROMPT = """
 Eres un analista de e-commerce y respondes en español claro.
@@ -47,7 +52,80 @@ REGLAS:
 
 # Persistencia EN MEMORIA DEL PROCESO: sirve para una clase y un prototipo local.
 # Al reiniciar el proceso, las conversaciones se pierden.
-CHECKPOINTER = InMemorySaver()
+CHECKPOINTER = None if USE_REDIS_MEMORY else InMemorySaver()
+
+_REDIS_CLIENT = None
+_REDIS_DISABLED = False
+
+def _get_redis_client():
+    global _REDIS_CLIENT, _REDIS_DISABLED
+    if not REDIS_URL or _REDIS_DISABLED:
+        return None
+    if _REDIS_CLIENT is not None:
+        return _REDIS_CLIENT
+    try:
+        import redis
+
+        _REDIS_CLIENT = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        _REDIS_CLIENT.ping()
+        return _REDIS_CLIENT
+    except Exception as exc:
+        # Si Redis falla, el agente continúa con memoria en RAM para no romper la app.
+        print(f"[WARN] Redis no disponible, usando memoria en proceso: {exc}")
+        _REDIS_DISABLED = True
+        return None
+
+
+def _redis_memory_key(session_id: str) -> str:
+    return f"{REDIS_KEY_PREFIX}{session_id}"
+
+
+def _cargar_historial_redis(session_id: str) -> list[dict[str, str]]:
+    client = _get_redis_client()
+    if client is None:
+        return []
+
+    raw = client.get(_redis_memory_key(session_id))
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+
+    history: list[dict[str, str]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role in {"user", "assistant"} and isinstance(content, str):
+            history.append({"role": role, "content": content})
+    return history
+
+
+def _guardar_historial_redis(session_id: str, messages: list) -> None:
+    client = _get_redis_client()
+    if client is None:
+        return
+
+    visible = [
+        {
+            "role": "user" if getattr(m, "type", "") == "human" else "assistant",
+            "content": str(m.content),
+        }
+        for m in messages
+        if getattr(m, "type", "") in {"human", "ai"}
+        and not getattr(m, "tool_calls", None)
+    ]
+    if len(visible) > WINDOW_MESSAGES:
+        visible = visible[-WINDOW_MESSAGES:]
+
+    client.set(
+        _redis_memory_key(session_id),
+        json.dumps(visible, ensure_ascii=False),
+        ex=REDIS_TTL_SECONDS,
+    )
 
 @before_model
 def ventana_contexto(state: AgentState, runtime: Runtime):
@@ -86,13 +164,16 @@ async def construir_agente():
         temperature=0,
     )
 
-    agent = create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-        checkpointer=CHECKPOINTER,
-        middleware=[ventana_contexto],
-    )
+    agent_kwargs = {
+        "model": llm,
+        "tools": tools,
+        "system_prompt": SYSTEM_PROMPT,
+        "middleware": [ventana_contexto],
+    }
+    if CHECKPOINTER is not None:
+        agent_kwargs["checkpointer"] = CHECKPOINTER
+
+    agent = create_agent(**agent_kwargs)
     return agent
 
 def _texto_final(messages: list) -> str:
@@ -133,12 +214,22 @@ async def resolver_consulta(
         raise RuntimeError("Falta OPENAI_API_KEY. Cópiala en un archivo .env.")
 
     agent = await construir_agente()
+    history_for_redis = _cargar_historial_redis(session_id)
+    input_messages = [
+        *history_for_redis,
+        {"role": "user", "content": mensaje},
+    ]
+
+    invoke_config = {"configurable": {"canal": canal}}
+    if CHECKPOINTER is not None:
+        invoke_config["configurable"]["thread_id"] = session_id
     result = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": mensaje}]},
-        {"configurable": {"thread_id": session_id, "canal": canal}},
+        {"messages": input_messages},
+        invoke_config,
     )
 
     messages = result["messages"]
+    _guardar_historial_redis(session_id, messages)
     user_visible = [
         {"rol": "usuario" if getattr(m, "type", "") == "human" else "asistente",
          "contenido": str(m.content)[:600]}
@@ -146,16 +237,23 @@ async def resolver_consulta(
         if getattr(m, "type", "") in {"human", "ai"} and not getattr(m, "tool_calls", None)
     ]
 
+    memoria_tipo = "redis_persistente" if _get_redis_client() is not None else "corto_plazo_en_memoria"
+    memoria_nota = (
+        "La conversación persiste en Redis entre reinicios del servicio."
+        if memoria_tipo == "redis_persistente"
+        else "La conversación persiste solo mientras el proceso esté activo."
+    )
+
     return {
         "respuesta": _texto_final(messages),
         "session_id": session_id,
         "canal": canal,
         "modelo": MODEL_NAME,
         "memoria": {
-            "tipo": "corto_plazo_en_memoria",
+            "tipo": memoria_tipo,
             "window_messages": WINDOW_MESSAGES,
             "mensajes_estado": len(messages),
-            "nota": "La conversación persiste solo mientras el proceso esté activo.",
+            "nota": memoria_nota,
         },
         "traza": _traza(messages),
         "historial_visible": user_visible[-WINDOW_MESSAGES:],
