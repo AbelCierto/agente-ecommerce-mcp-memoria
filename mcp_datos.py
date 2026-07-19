@@ -106,6 +106,43 @@ def _validar_year(year: int | None) -> int | None:
     return year
 
 
+def _parse_periodo(periodo: str) -> int | None:
+    value = _normalizar_texto(periodo, max_len=16).lower()
+    if value in {"all", "todo", "historico", "histórico"}:
+        return None
+    match = re.fullmatch(r"(\d{1,4})d", value)
+    if not match:
+        raise ValueError("Período inválido. Usa formatos como 30d, 90d, 180d o 'all'.")
+    days = int(match.group(1))
+    if days < 1 or days > 3650:
+        raise ValueError("Período fuera de rango. Debe estar entre 1d y 3650d.")
+    return days
+
+
+def _kpis_por_periodo(days: int | None) -> dict:
+    where = ""
+    params: tuple[object, ...] = ()
+    if days is not None:
+        where = "WHERE Order_Date >= date((SELECT MAX(Order_Date) FROM orders), ?)"
+        params = (f"-{days} day",)
+
+    sql = f"""
+    SELECT COUNT(*) AS Total_Orders,
+           COUNT(DISTINCT Customer_ID) AS Total_Customers,
+           ROUND(SUM(Order_Amount), 2) AS Revenue,
+           ROUND(SUM(Profit_Amount), 2) AS Profit,
+           ROUND(AVG(Order_Amount), 2) AS Average_Order_Value,
+           ROUND(AVG(Profit_Margin_Percent), 2) AS Average_Profit_Margin_Percent,
+           ROUND(100.0 * SUM(CASE WHEN Returned = 'Yes' THEN 1 ELSE 0 END) / COUNT(*), 2) AS Return_Rate_Percent,
+           ROUND(AVG(Review_Rating), 2) AS Average_Review_Rating,
+           ROUND(AVG(Delivery_Days), 2) AS Average_Delivery_Days
+    FROM orders
+    {where}
+    """
+    rows = ejecutar_sql(sql, params)
+    return rows[0] if rows else {}
+
+
 @mcp.tool()
 def buscar_clientes(texto: str, limite: int = 10) -> str:
     """Busca clientes por Customer_ID, país, ciudad, segmento o membresía.
@@ -394,6 +431,279 @@ def listar_paises(limite: int = 300) -> str:
     LIMIT ?
     """
     return as_json(ejecutar_sql(sql, (limite,)))
+
+
+@mcp.tool()
+def top_kpis(periodo: str = "90d") -> str:
+    """KPIs ejecutivos globales para un período reciente (ej. 30d, 90d, 180d, all)."""
+    try:
+        days = _parse_periodo(periodo)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
+    kpis = _kpis_por_periodo(days)
+    kpis["Period"] = "all" if days is None else f"{days}d"
+    return as_json([kpis], "No hay datos para el período solicitado")
+
+
+@mcp.tool()
+def comparativo_anual(year_a: int, year_b: int) -> str:
+    """Compara KPIs entre dos años y devuelve variaciones absolutas y porcentuales."""
+    try:
+        year_a = _validar_year(year_a)
+        year_b = _validar_year(year_b)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
+    sql = """
+    SELECT Year,
+           COUNT(*) AS Total_Orders,
+           COUNT(DISTINCT Customer_ID) AS Total_Customers,
+           ROUND(SUM(Order_Amount), 2) AS Revenue,
+           ROUND(SUM(Profit_Amount), 2) AS Profit,
+           ROUND(AVG(Order_Amount), 2) AS Average_Order_Value,
+           ROUND(100.0 * SUM(CASE WHEN Returned = 'Yes' THEN 1 ELSE 0 END) / COUNT(*), 2) AS Return_Rate_Percent
+    FROM orders
+    WHERE Year IN (?, ?)
+    GROUP BY Year
+    """
+    rows = ejecutar_sql(sql, (year_a, year_b))
+    data = {int(row["Year"]): row for row in rows if row.get("Year") is not None}
+    if year_a not in data or year_b not in data:
+        return as_json([], "No hay datos completos para ambos años solicitados")
+
+    a = data[year_a]
+    b = data[year_b]
+
+    def delta(metric: str) -> dict:
+        va = float(a.get(metric) or 0)
+        vb = float(b.get(metric) or 0)
+        change = round(vb - va, 2)
+        pct = round((change / va) * 100, 2) if va else None
+        return {
+            "metric": metric,
+            f"value_{year_a}": va,
+            f"value_{year_b}": vb,
+            "delta": change,
+            "delta_percent": pct,
+        }
+
+    return as_json(
+        [
+            {
+                "year_a": year_a,
+                "year_b": year_b,
+                "comparativo": [
+                    delta("Revenue"),
+                    delta("Profit"),
+                    delta("Total_Orders"),
+                    delta("Total_Customers"),
+                    delta("Average_Order_Value"),
+                    delta("Return_Rate_Percent"),
+                ],
+            }
+        ]
+    )
+
+
+@mcp.tool()
+def productos_baja_rotacion(periodo: str = "90d", limite: int = 15) -> str:
+    """Detecta productos de baja rotación en un período reciente para acciones de inventario."""
+    try:
+        days = _parse_periodo(periodo)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
+    limite = max(1, min(limite, 100))
+    where = ""
+    params: list[object] = []
+    if days is not None:
+        where = "WHERE Order_Date >= date((SELECT MAX(Order_Date) FROM orders), ?)"
+        params.append(f"-{days} day")
+
+    sql = f"""
+    SELECT Product_ID,
+           Product_Category,
+           Product_Subcategory,
+           Brand,
+           COUNT(*) AS Total_Orders,
+           SUM(Quantity) AS Units,
+           ROUND(SUM(Order_Amount), 2) AS Revenue,
+           ROUND(AVG(Unit_Price), 2) AS Average_Unit_Price
+    FROM orders
+    {where}
+    GROUP BY Product_ID, Product_Category, Product_Subcategory, Brand
+    HAVING SUM(Quantity) > 0
+    ORDER BY Units ASC, Revenue ASC
+    LIMIT ?
+    """
+    params.append(limite)
+    return as_json(
+        ejecutar_sql(sql, tuple(params)),
+        "No hay datos de productos para el período solicitado",
+    )
+
+
+@mcp.tool()
+def riesgo_churn_cliente(customer_id: str) -> str:
+    """Calcula un score heurístico de riesgo de churn para un cliente específico."""
+    try:
+        customer_id = _validar_customer_id(customer_id)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
+    sql = """
+    WITH global_max AS (
+        SELECT MAX(Order_Date) AS max_order_date FROM orders
+    ),
+    customer_base AS (
+        SELECT Customer_ID,
+               COUNT(*) AS Total_Orders,
+               ROUND(SUM(Order_Amount), 2) AS Revenue,
+               ROUND(AVG(Order_Amount), 2) AS Average_Order_Value,
+               ROUND(AVG(Review_Rating), 2) AS Average_Review_Rating,
+               ROUND(100.0 * SUM(CASE WHEN Returned = 'Yes' THEN 1 ELSE 0 END) / COUNT(*), 2) AS Return_Rate_Percent,
+               MAX(Order_Date) AS Last_Order_Date,
+               MAX(Customer_Segment) AS Customer_Segment,
+               MAX(Membership_Status) AS Membership_Status
+        FROM orders
+        WHERE Customer_ID = ?
+        GROUP BY Customer_ID
+    ),
+    gaps AS (
+        SELECT o.Customer_ID,
+               AVG(
+                   julianday(o.Order_Date) - julianday(
+                       LAG(o.Order_Date) OVER (PARTITION BY o.Customer_ID ORDER BY o.Order_Date)
+                   )
+               ) AS Avg_Days_Between_Orders
+        FROM orders o
+        WHERE o.Customer_ID = ?
+    )
+    SELECT cb.*,
+           ROUND(julianday(gm.max_order_date) - julianday(cb.Last_Order_Date), 2) AS Recency_Days,
+           ROUND(COALESCE(g.Avg_Days_Between_Orders, 0), 2) AS Avg_Days_Between_Orders
+    FROM customer_base cb
+    CROSS JOIN global_max gm
+    LEFT JOIN gaps g ON g.Customer_ID = cb.Customer_ID
+    """
+    rows = ejecutar_sql(sql, (customer_id, customer_id))
+    if not rows:
+        return as_json([], "Cliente no encontrado")
+
+    row = rows[0]
+    recency = float(row.get("Recency_Days") or 0)
+    avg_gap = float(row.get("Avg_Days_Between_Orders") or 0)
+    return_rate = float(row.get("Return_Rate_Percent") or 0)
+    rating = float(row.get("Average_Review_Rating") or 0)
+
+    score = 0
+    factors: list[str] = []
+    if avg_gap > 0 and recency > avg_gap * 2:
+        score += 45
+        factors.append("Recencia alta vs. patrón histórico de compra")
+    elif recency > 120:
+        score += 35
+        factors.append("Sin compras recientes")
+
+    if return_rate >= 25:
+        score += 25
+        factors.append("Tasa de devolución elevada")
+    elif return_rate >= 15:
+        score += 15
+        factors.append("Tasa de devolución moderada")
+
+    if rating and rating < 3.5:
+        score += 20
+        factors.append("Rating promedio bajo")
+
+    level = "bajo"
+    if score >= 60:
+        level = "alto"
+    elif score >= 30:
+        level = "medio"
+
+    return as_json(
+        [
+            {
+                **row,
+                "Churn_Risk_Score": min(score, 100),
+                "Churn_Risk_Level": level,
+                "Rationale": factors or ["Sin señales relevantes de churn en métricas observables"],
+            }
+        ]
+    )
+
+
+@mcp.tool()
+def alertas_negocio(periodo: str = "30d") -> str:
+    """Genera alertas ejecutivas simples basadas en devoluciones, margen, rating y entrega para un período."""
+    try:
+        days = _parse_periodo(periodo)
+    except ValueError as exc:
+        return as_json([], str(exc))
+
+    kpis = _kpis_por_periodo(days)
+    if not kpis:
+        return as_json([], "No hay datos para generar alertas")
+
+    alerts: list[dict] = []
+    return_rate = float(kpis.get("Return_Rate_Percent") or 0)
+    margin = float(kpis.get("Average_Profit_Margin_Percent") or 0)
+    rating = float(kpis.get("Average_Review_Rating") or 0)
+    delivery = float(kpis.get("Average_Delivery_Days") or 0)
+
+    if return_rate >= 18:
+        alerts.append({
+            "severity": "high",
+            "alert": "Devoluciones elevadas",
+            "metric": "Return_Rate_Percent",
+            "value": return_rate,
+            "suggestion": "Revisar calidad por categoría y causas de devolución.",
+        })
+    if margin <= 18:
+        alerts.append({
+            "severity": "medium",
+            "alert": "Margen promedio comprimido",
+            "metric": "Average_Profit_Margin_Percent",
+            "value": margin,
+            "suggestion": "Ajustar descuentos y mix de productos de bajo margen.",
+        })
+    if rating and rating < 3.8:
+        alerts.append({
+            "severity": "medium",
+            "alert": "Experiencia de cliente en riesgo",
+            "metric": "Average_Review_Rating",
+            "value": rating,
+            "suggestion": "Priorizar mejora de postventa y tiempos de entrega.",
+        })
+    if delivery >= 6:
+        alerts.append({
+            "severity": "medium",
+            "alert": "Demora logística por encima de objetivo",
+            "metric": "Average_Delivery_Days",
+            "value": delivery,
+            "suggestion": "Revisar SLA por región y método de envío.",
+        })
+
+    if not alerts:
+        alerts.append({
+            "severity": "info",
+            "alert": "Sin alertas críticas",
+            "metric": "general_health",
+            "value": "ok",
+            "suggestion": "Mantener monitoreo continuo de KPIs clave.",
+        })
+
+    return as_json(
+        [
+            {
+                "period": "all" if days is None else f"{days}d",
+                "kpis_base": kpis,
+                "alerts": alerts,
+            }
+        ]
+    )
 
 
 if __name__ == "__main__":
