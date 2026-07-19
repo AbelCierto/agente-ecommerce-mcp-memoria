@@ -21,7 +21,9 @@ from functools import lru_cache
 from pathlib import Path
 from fastmcp import FastMCP
 
-DB_PATH = Path(__file__).parent / "data" / "ecommerce_orders.db"
+DATA_DIR = Path(__file__).parent / "data"
+DB_PATH = DATA_DIR / "ecommerce_orders.db"
+CSV_PATH = DATA_DIR / "ecommerce_orders_dataset.csv"
 
 mcp = FastMCP(
     name="Ecommerce Analytics Data MCP",
@@ -34,13 +36,32 @@ mcp = FastMCP(
 
 def ejecutar_sql(sql: str, parametros: tuple = ()) -> list[dict]:
     if not DB_PATH.exists():
+        _bootstrap_db_if_missing()
+    if not DB_PATH.exists():
         raise FileNotFoundError(
-            f"No existe {DB_PATH}. Ejecuta: python data/import_dataset_to_sqlite.py"
+            f"No existe {DB_PATH}. No se pudo inicializar desde {CSV_PATH}."
         )
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(sql, parametros).fetchall()
     return [dict(row) for row in rows]
+
+
+def _bootstrap_db_if_missing() -> None:
+    if DB_PATH.exists():
+        return
+    if not CSV_PATH.exists():
+        return
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from data.import_dataset_to_sqlite import main as import_main
+
+        print(f"[INFO] Base no encontrada en {DB_PATH}. Generando desde CSV...")
+        import_main()
+        print("[INFO] Base SQLite inicializada correctamente.")
+    except Exception as exc:
+        print(f"[WARN] No se pudo generar SQLite automáticamente: {exc}")
 
 
 def as_json(rows: list[dict], empty_message: str = "No se encontraron resultados") -> str:
