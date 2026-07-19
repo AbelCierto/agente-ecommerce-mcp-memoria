@@ -14,6 +14,7 @@ El proyecto tiene **3 procesos** que localmente corren en terminales separadas. 
 │                                                                 │
 │  Terminal 1: mcp_datos.py  ─► Servicio backend (Railway/Render) │
 │  Terminal 2: mcp_agente.py ─► Servicio backend (Railway/Render) │
+│  Redis (memoria)          ─► Servicio Redis (Railway)           │
 │  Terminal 3: streamlit     ─► Streamlit Community Cloud         │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -146,6 +147,7 @@ Desde el dashboard de Railway:
    OPENAI_MODEL=gpt-5.4-nano
    DATA_MCP_URL=https://xxxxx-mcp-datos.railway.app/mcp
    MEMORY_WINDOW_MESSAGES=8
+    REDIS_URL=redis://default:password@redis-host:6379
    PORT=8001
    ```
 5. **Networking → Expose port**: `8001`
@@ -154,6 +156,14 @@ Desde el dashboard de Railway:
 > **Nota sobre el dataset**: Railway no incluye `ecommerce_orders.db` porque está en `.gitignore`. Opciones:
 > - Agregar un **start command** que ejecute `python data/import_dataset_to_sqlite.py` antes de iniciar
 > - O subir solo el CSV al repo y regenerar la BD en el arranque
+
+### 2.5 Servicio Redis (memoria persistente)
+
+1. En Railway, agrega un servicio **Redis** al mismo proyecto.
+2. En el servicio `mcp_agente`, crea una **Variable Reference** a `REDIS_URL` del servicio Redis.
+3. Redeploy de `mcp_agente`.
+
+Con esto, la memoria del agente persiste entre reinicios del servicio.
 
 ### 2.4 Verificar los backends
 
@@ -243,6 +253,7 @@ if "services_started" not in st.session_state:
 | `OPENAI_MODEL` | `gpt-5.4-nano` | `gpt-5.4-nano` | `gpt-5.4-nano` |
 | `AGENT_MCP_URL` | `http://127.0.0.1:8001/mcp` | `https://agente.railway.app/mcp` | — |
 | `DATA_MCP_URL` | `http://127.0.0.1:8000/mcp` | — | `https://datos.railway.app/mcp` |
+| `REDIS_URL` | `redis://localhost:6379/0` | — | `redis://...` (Reference) |
 | `MEMORY_WINDOW_MESSAGES` | `8` | `8` | `8` |
 | `MCP_AGENT_TRANSPORT` | `http` (export manual) | — | `http` |
 

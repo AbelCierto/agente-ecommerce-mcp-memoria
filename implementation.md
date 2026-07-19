@@ -118,6 +118,7 @@ Contexto al modelo = instrucciones + mensaje inicial + últimos 8 mensajes
 - **Python 3.11+** instalado
 - **OpenAI API Key** (https://platform.openai.com/account/api-keys)
 - **Git Bash** (instalado con Git para Windows)
+- **Docker Desktop** (para levantar Redis local)
 - **Puertos disponibles**: 8000 y 8001
 - **~5 min de tiempo** para la instalación
 
@@ -129,6 +130,36 @@ python -m pip --version
 ```
 
 Si ves versión 3.11 o superior, estás listo.
+
+---
+
+## Paso 0: Levantar Redis local con Docker
+
+Ahora el agente soporta memoria persistente en Redis. Para desarrollo local, inicia Redis antes de los servicios MCP:
+
+```bash
+docker run --name redis-mcp -p 6379:6379 -d redis:7-alpine
+```
+
+Verifica que esté activo:
+
+```bash
+docker ps
+```
+
+Para detenerlo:
+
+```bash
+docker stop redis-mcp
+```
+
+Para iniciarlo nuevamente:
+
+```bash
+docker start redis-mcp
+```
+
+Si quieres memoria en RAM (sin Redis), simplemente no levantes el contenedor y el agente hará fallback automático.
 
 ---
 
@@ -196,6 +227,7 @@ OPENAI_MODEL=gpt-5.4-nano
 DATA_MCP_URL=http://127.0.0.1:8000/mcp
 AGENT_MCP_URL=http://127.0.0.1:8001/mcp
 MEMORY_WINDOW_MESSAGES=8
+REDIS_URL=redis://localhost:6379/0
 ```
 
 **Importante**:

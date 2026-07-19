@@ -6,3 +6,5 @@ data/ecommerce_orders.db
 .streamlit/secrets.toml
 .DS_Store
 .streamlit/secrets.tom
+reporte_final_trabajo_mcp.html
+reporte_final_trabajo_mcp.pdf
