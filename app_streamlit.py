@@ -10,12 +10,9 @@ Es un cliente que consume mcp_agente.py por HTTP y hace visible:
 """
 from __future__ import annotations
 import asyncio
-import csv
 import hmac
-import io
 import json
 import os
-import textwrap
 import uuid
 import streamlit as st
 from dotenv import load_dotenv
@@ -40,12 +37,6 @@ APP_LOGIN_ENABLED = str(
     )
 ).lower() in {"1", "true", "yes", "on"}
 DEFAULT_ANALYSIS_MODE = str(get_config_value("DEFAULT_ANALYSIS_MODE", "operativo")).lower()
-PDF_EXPORT_ENABLED = str(get_config_value("PDF_EXPORT_ENABLED", "true")).lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-}
 
 st.set_page_config(page_title="E-commerce Agent MCP", page_icon="🛒", layout="wide")
 
@@ -165,7 +156,7 @@ st.markdown(
     """
 <div class="hero-box">
   <h1 style="margin:0;">🛒 Agente e-commerce: Centro de análisis MCP</h1>
-  <p style="margin:6px 0 0 0;">Explora hallazgos, conversa con el agente y exporta análisis ejecutivos en un solo panel.</p>
+    <p style="margin:6px 0 0 0;">Explora hallazgos, conversa con el agente y revisa memoria y traza en un solo panel.</p>
 </div>
 """,
     unsafe_allow_html=True,
@@ -198,115 +189,6 @@ def contar_tool_calls(result: dict | None) -> int:
     if not isinstance(trace, list):
         return 0
     return sum(1 for item in trace if isinstance(item, dict) and item.get("tipo") == "tool_call")
-
-
-def export_csv_bytes(result: dict) -> bytes:
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["campo", "valor"])
-    writer.writerow(["session_id", result.get("session_id", "")])
-    writer.writerow(["canal", result.get("canal", "")])
-    writer.writerow(["modelo", result.get("modelo", "")])
-    writer.writerow(["respuesta", result.get("respuesta", "")])
-    writer.writerow(["memoria", json.dumps(result.get("memoria", {}), ensure_ascii=False)])
-    writer.writerow(["traza", json.dumps(result.get("traza", []), ensure_ascii=False)])
-    writer.writerow(["historial_visible", json.dumps(result.get("historial_visible", []), ensure_ascii=False)])
-    return output.getvalue().encode("utf-8")
-
-
-def export_pdf_bytes(result: dict) -> bytes | None:
-    try:
-        from fpdf import FPDF
-    except Exception:
-        return None
-
-    def _safe_pdf_text(value: object) -> str:
-        text = str(value)
-        # fpdf core fonts no soportan unicode completo; degradamos de forma segura.
-        text = text.encode("latin-1", errors="replace").decode("latin-1")
-        # Evita tokens largos sin espacios que rompen el line-wrap.
-        words = []
-        for token in text.split(" "):
-            if len(token) > 40:
-                chunks = [token[i:i + 40] for i in range(0, len(token), 40)]
-                words.append(" ".join(chunks))
-            else:
-                words.append(token)
-        return " ".join(words)
-
-    def _write_block(pdf: FPDF, text: str, h: int = 6, width_chars: int = 95) -> None:
-        page_width = pdf.w - pdf.l_margin - pdf.r_margin
-        safe = _safe_pdf_text(text)
-        for raw_line in safe.splitlines() or [safe]:
-            line = raw_line if raw_line else " "
-            wrapped = textwrap.wrap(
-                line,
-                width=width_chars,
-                break_long_words=True,
-                break_on_hyphens=False,
-            ) or [" "]
-            for chunk in wrapped:
-                pdf.set_x(pdf.l_margin)
-                pdf.cell(page_width, h, txt=chunk, ln=1)
-
-    def _render_full_report() -> bytes:
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=14)
-        pdf.add_page()
-        pdf.set_font("Helvetica", "B", 14)
-        _write_block(pdf, "Reporte de analisis e-commerce", h=8, width_chars=70)
-        pdf.ln(1)
-
-        pdf.set_font("Helvetica", size=11)
-        _write_block(pdf, f"Session ID: {result.get('session_id', '')}")
-        _write_block(pdf, f"Canal: {result.get('canal', '')}")
-        _write_block(pdf, f"Modelo: {result.get('modelo', '')}")
-        pdf.ln(2)
-
-        pdf.set_font("Helvetica", "B", 12)
-        _write_block(pdf, "Respuesta", h=7, width_chars=70)
-        pdf.set_font("Helvetica", size=11)
-        _write_block(pdf, str(result.get("respuesta", "")), h=6, width_chars=95)
-        pdf.ln(2)
-
-        pdf.set_font("Helvetica", "B", 12)
-        _write_block(pdf, "Memoria", h=7, width_chars=70)
-        pdf.set_font("Helvetica", size=10)
-        _write_block(
-            pdf,
-            json.dumps(result.get("memoria", {}), ensure_ascii=False, indent=2),
-            h=5,
-            width_chars=105,
-        )
-
-        raw = pdf.output(dest="S")
-        if isinstance(raw, bytes):
-            return raw
-        return raw.encode("latin-1", errors="ignore")
-
-    def _render_minimal_fallback() -> bytes:
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=14)
-        pdf.add_page()
-        pdf.set_font("Helvetica", "B", 13)
-        _write_block(pdf, "Reporte de analisis (fallback)", h=8, width_chars=70)
-        pdf.set_font("Helvetica", size=11)
-        _write_block(pdf, f"Session ID: {result.get('session_id', '')}")
-        _write_block(pdf, f"Canal: {result.get('canal', '')}")
-        _write_block(pdf, "Se aplico modo fallback por formato de contenido complejo.")
-        _write_block(pdf, "Exporta CSV para ver el detalle completo.")
-        raw = pdf.output(dest="S")
-        if isinstance(raw, bytes):
-            return raw
-        return raw.encode("latin-1", errors="ignore")
-
-    try:
-        return _render_full_report()
-    except Exception:
-        try:
-            return _render_minimal_fallback()
-        except Exception:
-            return None
 
 async def llamar_agente(mensaje: str) -> dict:
     client = MultiServerMCPClient(
@@ -420,36 +302,6 @@ if prompt:
 
 if st.session_state.last_result:
     result = st.session_state.last_result
-    st.divider()
-    st.subheader("Exportar análisis")
-    csv_bytes = export_csv_bytes(result)
-    export_col1, export_col2 = st.columns(2)
-    with export_col1:
-        st.download_button(
-            label="Descargar CSV",
-            data=csv_bytes,
-            file_name=f"analisis_{st.session_state.session_id}.csv",
-            mime="text/csv",
-        )
-    with export_col2:
-        if PDF_EXPORT_ENABLED:
-            try:
-                pdf_bytes = export_pdf_bytes(result)
-                if pdf_bytes is not None:
-                    st.download_button(
-                        label="Descargar PDF",
-                        data=pdf_bytes,
-                        file_name=f"analisis_{st.session_state.session_id}.pdf",
-                        mime="application/pdf",
-                    )
-                else:
-                    st.info("Instala fpdf2 para habilitar exportación PDF.")
-            except Exception:
-                st.warning(
-                    "No se pudo generar el PDF con este contenido. "
-                    "Puedes exportar CSV sin problema."
-                )
-
     left, right = st.columns(2)
     with left:
         st.subheader("Memoria de corto plazo")
