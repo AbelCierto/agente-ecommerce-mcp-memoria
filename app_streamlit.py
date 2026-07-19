@@ -15,6 +15,7 @@ import hmac
 import io
 import json
 import os
+import textwrap
 import uuid
 import streamlit as st
 from dotenv import load_dotenv
@@ -233,37 +234,79 @@ def export_pdf_bytes(result: dict) -> bytes | None:
                 words.append(token)
         return " ".join(words)
 
-    def _write_line(pdf: FPDF, text: str, h: int = 6) -> None:
+    def _write_block(pdf: FPDF, text: str, h: int = 6, width_chars: int = 95) -> None:
         page_width = pdf.w - pdf.l_margin - pdf.r_margin
-        pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(page_width, h, _safe_pdf_text(text))
+        safe = _safe_pdf_text(text)
+        for raw_line in safe.splitlines() or [safe]:
+            line = raw_line if raw_line else " "
+            wrapped = textwrap.wrap(
+                line,
+                width=width_chars,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [" "]
+            for chunk in wrapped:
+                pdf.set_x(pdf.l_margin)
+                pdf.cell(page_width, h, txt=chunk, ln=1)
 
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=14)
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 14)
-    _write_line(pdf, "Reporte de analisis e-commerce", h=8)
-    pdf.ln(1)
-    pdf.set_font("Helvetica", size=11)
-    _write_line(pdf, f"Session ID: {result.get('session_id', '')}")
-    _write_line(pdf, f"Canal: {result.get('canal', '')}")
-    _write_line(pdf, f"Modelo: {result.get('modelo', '')}")
-    pdf.ln(2)
-    pdf.set_font("Helvetica", "B", 12)
-    _write_line(pdf, "Respuesta", h=7)
-    pdf.set_font("Helvetica", size=11)
-    _write_line(pdf, str(result.get("respuesta", "")))
-    pdf.ln(2)
-    pdf.set_font("Helvetica", "B", 12)
-    _write_line(pdf, "Memoria", h=7)
-    pdf.set_font("Helvetica", size=10)
-    _write_line(pdf, json.dumps(result.get("memoria", {}), ensure_ascii=False, indent=2), h=5)
+    def _render_full_report() -> bytes:
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=14)
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 14)
+        _write_block(pdf, "Reporte de analisis e-commerce", h=8, width_chars=70)
+        pdf.ln(1)
 
-    # output(dest='S') devuelve str en algunas versiones y bytes en otras.
-    raw = pdf.output(dest="S")
-    if isinstance(raw, bytes):
-        return raw
-    return raw.encode("latin-1", errors="ignore")
+        pdf.set_font("Helvetica", size=11)
+        _write_block(pdf, f"Session ID: {result.get('session_id', '')}")
+        _write_block(pdf, f"Canal: {result.get('canal', '')}")
+        _write_block(pdf, f"Modelo: {result.get('modelo', '')}")
+        pdf.ln(2)
+
+        pdf.set_font("Helvetica", "B", 12)
+        _write_block(pdf, "Respuesta", h=7, width_chars=70)
+        pdf.set_font("Helvetica", size=11)
+        _write_block(pdf, str(result.get("respuesta", "")), h=6, width_chars=95)
+        pdf.ln(2)
+
+        pdf.set_font("Helvetica", "B", 12)
+        _write_block(pdf, "Memoria", h=7, width_chars=70)
+        pdf.set_font("Helvetica", size=10)
+        _write_block(
+            pdf,
+            json.dumps(result.get("memoria", {}), ensure_ascii=False, indent=2),
+            h=5,
+            width_chars=105,
+        )
+
+        raw = pdf.output(dest="S")
+        if isinstance(raw, bytes):
+            return raw
+        return raw.encode("latin-1", errors="ignore")
+
+    def _render_minimal_fallback() -> bytes:
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=14)
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 13)
+        _write_block(pdf, "Reporte de analisis (fallback)", h=8, width_chars=70)
+        pdf.set_font("Helvetica", size=11)
+        _write_block(pdf, f"Session ID: {result.get('session_id', '')}")
+        _write_block(pdf, f"Canal: {result.get('canal', '')}")
+        _write_block(pdf, "Se aplico modo fallback por formato de contenido complejo.")
+        _write_block(pdf, "Exporta CSV para ver el detalle completo.")
+        raw = pdf.output(dest="S")
+        if isinstance(raw, bytes):
+            return raw
+        return raw.encode("latin-1", errors="ignore")
+
+    try:
+        return _render_full_report()
+    except Exception:
+        try:
+            return _render_minimal_fallback()
+        except Exception:
+            return None
 
 async def llamar_agente(mensaje: str) -> dict:
     client = MultiServerMCPClient(
