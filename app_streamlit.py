@@ -219,26 +219,45 @@ def export_pdf_bytes(result: dict) -> bytes | None:
     except Exception:
         return None
 
+    def _safe_pdf_text(value: object) -> str:
+        text = str(value)
+        # fpdf core fonts no soportan unicode completo; degradamos de forma segura.
+        text = text.encode("latin-1", errors="replace").decode("latin-1")
+        # Evita tokens largos sin espacios que rompen el line-wrap.
+        words = []
+        for token in text.split(" "):
+            if len(token) > 40:
+                chunks = [token[i:i + 40] for i in range(0, len(token), 40)]
+                words.append(" ".join(chunks))
+            else:
+                words.append(token)
+        return " ".join(words)
+
+    def _write_line(pdf: FPDF, text: str, h: int = 6) -> None:
+        page_width = pdf.w - pdf.l_margin - pdf.r_margin
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(page_width, h, _safe_pdf_text(text))
+
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=14)
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 14)
-    pdf.multi_cell(0, 8, "Reporte de analisis e-commerce")
+    _write_line(pdf, "Reporte de analisis e-commerce", h=8)
     pdf.ln(1)
     pdf.set_font("Helvetica", size=11)
-    pdf.multi_cell(0, 6, f"Session ID: {result.get('session_id', '')}")
-    pdf.multi_cell(0, 6, f"Canal: {result.get('canal', '')}")
-    pdf.multi_cell(0, 6, f"Modelo: {result.get('modelo', '')}")
+    _write_line(pdf, f"Session ID: {result.get('session_id', '')}")
+    _write_line(pdf, f"Canal: {result.get('canal', '')}")
+    _write_line(pdf, f"Modelo: {result.get('modelo', '')}")
     pdf.ln(2)
     pdf.set_font("Helvetica", "B", 12)
-    pdf.multi_cell(0, 7, "Respuesta")
+    _write_line(pdf, "Respuesta", h=7)
     pdf.set_font("Helvetica", size=11)
-    pdf.multi_cell(0, 6, str(result.get("respuesta", "")))
+    _write_line(pdf, str(result.get("respuesta", "")))
     pdf.ln(2)
     pdf.set_font("Helvetica", "B", 12)
-    pdf.multi_cell(0, 7, "Memoria")
+    _write_line(pdf, "Memoria", h=7)
     pdf.set_font("Helvetica", size=10)
-    pdf.multi_cell(0, 5, json.dumps(result.get("memoria", {}), ensure_ascii=False, indent=2))
+    _write_line(pdf, json.dumps(result.get("memoria", {}), ensure_ascii=False, indent=2), h=5)
 
     # output(dest='S') devuelve str en algunas versiones y bytes en otras.
     raw = pdf.output(dest="S")
@@ -371,16 +390,22 @@ if st.session_state.last_result:
         )
     with export_col2:
         if PDF_EXPORT_ENABLED:
-            pdf_bytes = export_pdf_bytes(result)
-            if pdf_bytes is not None:
-                st.download_button(
-                    label="Descargar PDF",
-                    data=pdf_bytes,
-                    file_name=f"analisis_{st.session_state.session_id}.pdf",
-                    mime="application/pdf",
+            try:
+                pdf_bytes = export_pdf_bytes(result)
+                if pdf_bytes is not None:
+                    st.download_button(
+                        label="Descargar PDF",
+                        data=pdf_bytes,
+                        file_name=f"analisis_{st.session_state.session_id}.pdf",
+                        mime="application/pdf",
+                    )
+                else:
+                    st.info("Instala fpdf2 para habilitar exportación PDF.")
+            except Exception:
+                st.warning(
+                    "No se pudo generar el PDF con este contenido. "
+                    "Puedes exportar CSV sin problema."
                 )
-            else:
-                st.info("Instala fpdf2 para habilitar exportación PDF.")
 
     left, right = st.columns(2)
     with left:
