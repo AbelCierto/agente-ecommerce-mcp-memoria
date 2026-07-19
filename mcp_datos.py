@@ -361,6 +361,41 @@ def ayuda_analitica(consulta: str = "") -> str:
     )
 
 
+@mcp.tool()
+def resumen_base() -> str:
+    """Entrega métricas globales del dataset: órdenes, clientes, países, ciudades y rango temporal."""
+    sql = """
+    SELECT
+        COUNT(*) AS Total_Orders,
+        COUNT(DISTINCT Customer_ID) AS Total_Customers,
+        COUNT(DISTINCT Country) AS Total_Countries,
+        COUNT(DISTINCT City) AS Total_Cities,
+        MIN(Order_Date) AS First_Order_Date,
+        MAX(Order_Date) AS Last_Order_Date,
+        ROUND(SUM(Order_Amount), 2) AS Total_Revenue,
+        ROUND(SUM(Profit_Amount), 2) AS Total_Profit
+    FROM orders
+    """
+    return as_json(ejecutar_sql(sql))
+
+
+@mcp.tool()
+def listar_paises(limite: int = 300) -> str:
+    """Lista países presentes en el dataset con número de órdenes y facturación por país."""
+    limite = max(1, min(limite, 500))
+    sql = """
+    SELECT Country,
+           COUNT(*) AS Total_Orders,
+           ROUND(SUM(Order_Amount), 2) AS Revenue,
+           ROUND(SUM(Profit_Amount), 2) AS Profit
+    FROM orders
+    GROUP BY Country
+    ORDER BY Country ASC
+    LIMIT ?
+    """
+    return as_json(ejecutar_sql(sql, (limite,)))
+
+
 if __name__ == "__main__":
     import os
     port = int(os.getenv("PORT", 8000))
